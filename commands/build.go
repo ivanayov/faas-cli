@@ -24,7 +24,10 @@ var (
 	shrinkwrap  bool
 	buildArgs   []string
 	buildArgMap map[string]string
+	buildOption string
 )
+
+const additionalPackageBuildArg = "ADDITIONAL_PACKAGE"
 
 func init() {
 	// Setup flags that are used by multiple commands (variables defined in faas.go)
@@ -43,6 +46,8 @@ func init() {
 
 	buildCmd.Flags().StringArrayVarP(&buildArgs, "build-arg", "b", []string{}, "Add a build-arg for Docker (KEY=VALUE)")
 
+	buildCmd.Flags().StringVar(&buildOption, "build-option", "", "Set a build option, e.g. dev")
+
 	// Set bash-completion.
 	_ = buildCmd.Flags().SetAnnotation("handler", cobra.BashCompSubdirsInDir, []string{})
 
@@ -60,13 +65,15 @@ var buildCmd = &cobra.Command{
                  [--regex "REGEX"]
 				 [--filter "WILDCARD"]
 				 [--parallel PARALLEL_DEPTH]
-				 [--build-arg KEY=VALUE]`,
+				 [--build-arg KEY=VALUE]
+				 [--build-option VALUE]`,
 	Short: "Builds OpenFaaS function containers",
 	Long: `Builds OpenFaaS function containers either via the supplied YAML config using
 the "--yaml" flag (which may contain multiple function definitions), or directly
 via flags.`,
 	Example: `  faas-cli build -f https://domain/path/myfunctions.yml
   faas-cli build -f ./stack.yml --no-cache --build-arg NPM_VERSION=0.2.2
+  faas-cli build -f ./stack.yml --build-option dev
   faas-cli build -f ./stack.yml --filter "*gif*"
   faas-cli build -f ./stack.yml --regex "fn[0-9]_.*"
   faas-cli build --image=my_image --lang=python --handler=/path/to/fn/ 
@@ -79,6 +86,14 @@ via flags.`,
 func preRunBuild(cmd *cobra.Command, args []string) error {
 	language, _ = validateLanguageFlag(language)
 
+	if buildOption != "" {
+		arg, isValid, err := validateBuildOption(buildOption, language)
+
+		if isValid && err == nil {
+			buildArgs = append(buildArgs, arg)
+		}
+	}
+
 	mapped, err := parseBuildArgs(buildArgs)
 
 	if err == nil {
@@ -90,6 +105,7 @@ func preRunBuild(cmd *cobra.Command, args []string) error {
 
 func parseBuildArgs(args []string) (map[string]string, error) {
 	mapped := make(map[string]string)
+	additionalPackageBuildArgCounter := 0
 
 	for _, kvp := range args {
 		index := strings.Index(kvp, "=")
@@ -109,10 +125,71 @@ func parseBuildArgs(args []string) (map[string]string, error) {
 			return nil, fmt.Errorf("build-arg must have a non-empty value")
 		}
 
-		mapped[k] = v
+		if k == additionalPackageBuildArg {
+			if additionalPackageBuildArgCounter > 0 {
+				mapped[k] = mapped[k] + " " + v
+			} else {
+				mapped[k] = v
+				additionalPackageBuildArgCounter++
+			}
+		} else {
+			mapped[k] = v
+		}
 	}
 
 	return mapped, nil
+}
+
+func validateBuildOption(buildOption string, language string) (string, bool, error) {
+
+	buildOptions, err := deriveBuildOptions(language)
+
+	if err != nil {
+		return "", false, err
+	}
+
+	if len(buildOptions) > 0 {
+		res, isFound := findBuildOption(buildOptions, buildOption)
+		buildOptionPackages := strings.Join(res.Packages, " ")
+		return additionalPackageBuildArg + "=" + buildOptionPackages, isFound, err
+	}
+
+	fmt.Println("WARNING! You're trying to use --build-option flag for a language template that doesn't support it.")
+
+	return "", false, err
+}
+
+func deriveBuildOptions(language string) ([]stack.BuildOption, error) {
+	var buildOptions = []stack.BuildOption{}
+
+	pathToTemplateYAML := "./template/" + language + "/template.yml"
+	if _, err := os.Stat(pathToTemplateYAML); os.IsNotExist(err) {
+		return buildOptions, err
+	}
+
+	var langTemplate stack.LanguageTemplate
+	parsedLangTemplate, err := stack.ParseYAMLForLanguageTemplate(pathToTemplateYAML)
+
+	if err != nil {
+		return buildOptions, err
+	}
+
+	if parsedLangTemplate != nil {
+		langTemplate = *parsedLangTemplate
+		buildOptions = langTemplate.BuildOptions
+	}
+
+	return buildOptions, nil
+}
+
+func findBuildOption(buildOptions []stack.BuildOption, requiredBuildOption string) (stack.BuildOption, bool) {
+	for _, option := range buildOptions {
+		if option.Name == requiredBuildOption {
+			return option, true
+		}
+	}
+
+	return stack.BuildOption{}, false
 }
 
 func runBuild(cmd *cobra.Command, args []string) error {
