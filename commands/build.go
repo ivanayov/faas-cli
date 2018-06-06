@@ -87,9 +87,9 @@ func preRunBuild(cmd *cobra.Command, args []string) error {
 	language, _ = validateLanguageFlag(language)
 
 	if buildOption != "" {
-		arg, isValid, err := validateBuildOption(buildOption, language)
+		arg, validBuildOption, err := validateBuildOption(buildOption, language)
 
-		if isValid && err == nil {
+		if validBuildOption && err == nil {
 			buildArgs = append(buildArgs, arg)
 		}
 	}
@@ -105,7 +105,6 @@ func preRunBuild(cmd *cobra.Command, args []string) error {
 
 func parseBuildArgs(args []string) (map[string]string, error) {
 	mapped := make(map[string]string)
-	additionalPackageBuildArgCounter := 0
 
 	for _, kvp := range args {
 		index := strings.Index(kvp, "=")
@@ -125,13 +124,8 @@ func parseBuildArgs(args []string) (map[string]string, error) {
 			return nil, fmt.Errorf("build-arg must have a non-empty value")
 		}
 
-		if k == additionalPackageBuildArg {
-			if additionalPackageBuildArgCounter > 0 {
-				mapped[k] = mapped[k] + " " + v
-			} else {
-				mapped[k] = v
-				additionalPackageBuildArgCounter++
-			}
+		if k == additionalPackageBuildArg && len(mapped[k]) > 0 {
+			mapped[k] = mapped[k] + " " + v
 		} else {
 			mapped[k] = v
 		}
@@ -140,21 +134,50 @@ func parseBuildArgs(args []string) (map[string]string, error) {
 	return mapped, nil
 }
 
-func validateBuildOption(buildOption string, language string) (string, bool, error) {
+func checkAndApplyBuildOptions(function stack.Function) {
+	if len(function.Build.Options) > 0 {
+		for _, option := range function.Build.Options {
+			arg, validBuildOption, err := validateBuildOption(option, function.Language)
 
+			if validBuildOption && err == nil {
+				extendBuildArgMap(arg)
+			}
+		}
+	}
+}
+
+func extendBuildArgMap(newBuildArg string) {
+	separator := strings.Index(newBuildArg, "=")
+	values := []string{newBuildArg[0:separator], newBuildArg[separator+1:]}
+
+	argKey := strings.TrimSpace(values[0])
+	argValue := strings.TrimSpace(values[1])
+
+	if packagesArg, hasPackagesArg := buildArgMap[argKey]; hasPackagesArg {
+		buildArgMap[argKey] = packagesArg + " " + argValue
+	} else {
+		buildArgMap[argKey] = argValue
+	}
+}
+
+func validateBuildOption(buildOption string, language string) (string, bool, error) {
 	buildOptions, err := deriveBuildOptions(language)
 
 	if err != nil {
 		return "", false, err
 	}
 
-	if len(buildOptions) > 0 {
-		res, isFound := findBuildOption(buildOptions, buildOption)
-		buildOptionPackages := strings.Join(res.Packages, " ")
+	foundOption, isFound := findBuildOption(buildOptions, buildOption)
+
+	if isFound {
+		buildOptionPackages := strings.Join(foundOption.Packages, " ")
 		return additionalPackageBuildArg + "=" + buildOptionPackages, isFound, err
 	}
 
-	fmt.Println("WARNING! You're trying to use --build-option flag for a language template that doesn't support it.")
+	err = fmt.Errorf("ERROR! You're using a wrong build option. Please check the  template/language/template.yml for supported build options.")
+	if err != nil {
+		fmt.Println(err)
+	}
 
 	return "", false, err
 }
@@ -256,6 +279,7 @@ func build(services *stack.Services, queueDepth int, shrinkwrap bool) {
 		if function.SkipBuild {
 			fmt.Printf("Skipping build of: %s.\n", function.Name)
 		} else {
+			checkAndApplyBuildOptions(function)
 			function.Name = k
 			workChannel <- function
 		}

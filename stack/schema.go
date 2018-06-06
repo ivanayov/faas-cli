@@ -47,6 +47,12 @@ type Function struct {
 
 	// Requests of resources requested by function
 	Requests *FunctionResources `yaml:"requests"`
+
+	Build Build `yaml:"build"`
+}
+
+type Build struct {
+	Options []string `yaml:"options"`
 }
 
 // FunctionResources Memory and CPU
