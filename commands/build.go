@@ -18,16 +18,15 @@ import (
 
 // Flags that are to be added to commands.
 var (
-	nocache     bool
-	squash      bool
-	parallel    int
-	shrinkwrap  bool
-	buildArgs   []string
-	buildArgMap map[string]string
-	buildOption string
+	nocache             bool
+	squash              bool
+	parallel            int
+	shrinkwrap          bool
+	buildArgs           []string
+	buildArgMap         map[string]string
+	buildOptions        []string
+	additionalBuildArgs []string
 )
-
-const additionalPackageBuildArg = "ADDITIONAL_PACKAGE"
 
 func init() {
 	// Setup flags that are used by multiple commands (variables defined in faas.go)
@@ -46,7 +45,7 @@ func init() {
 
 	buildCmd.Flags().StringArrayVarP(&buildArgs, "build-arg", "b", []string{}, "Add a build-arg for Docker (KEY=VALUE)")
 
-	buildCmd.Flags().StringVar(&buildOption, "build-option", "", "Set a build option, e.g. dev")
+	buildCmd.Flags().StringArrayVarP(&buildOptions, "build-option", "o", []string{}, "Set a build option, e.g. dev")
 
 	// Set bash-completion.
 	_ = buildCmd.Flags().SetAnnotation("handler", cobra.BashCompSubdirsInDir, []string{})
@@ -86,133 +85,98 @@ via flags.`,
 func preRunBuild(cmd *cobra.Command, args []string) error {
 	language, _ = validateLanguageFlag(language)
 
-	if buildOption != "" {
-		arg, validBuildOption, err := validateBuildOption(buildOption, language)
-
-		if validBuildOption && err == nil {
-			buildArgs = append(buildArgs, arg)
-		}
-	}
-
-	mapped, err := parseBuildArgs(buildArgs)
+	mapped, err := parseMap(buildArgs, "build-arg")
 
 	if err == nil {
 		buildArgMap = mapped
 	}
 
+	if len(buildOptions) > 0 {
+		args, _ := validateBuildOptions(buildOptions, language)
+		extendBuildArgMap(args)
+	}
+
 	return err
 }
 
-func parseBuildArgs(args []string) (map[string]string, error) {
-	mapped := make(map[string]string)
-
-	for _, kvp := range args {
-		index := strings.Index(kvp, "=")
-		if index == -1 {
-			return nil, fmt.Errorf("each build-arg must take the form key=value")
-		}
-
-		values := []string{kvp[0:index], kvp[index+1:]}
-
-		k := strings.TrimSpace(values[0])
-		v := strings.TrimSpace(values[1])
-
-		if len(k) == 0 {
-			return nil, fmt.Errorf("build-arg must have a non-empty key")
-		}
-		if len(v) == 0 {
-			return nil, fmt.Errorf("build-arg must have a non-empty value")
-		}
-
-		if k == additionalPackageBuildArg && len(mapped[k]) > 0 {
-			mapped[k] = mapped[k] + " " + v
-		} else {
-			mapped[k] = v
-		}
-	}
-
-	return mapped, nil
-}
-
-func checkAndApplyBuildOptions(function stack.Function) {
-	if len(function.Build.Options) > 0 {
-		for _, option := range function.Build.Options {
-			arg, validBuildOption, err := validateBuildOption(option, function.Language)
-
-			if validBuildOption && err == nil {
-				extendBuildArgMap(arg)
-			}
-		}
-	}
-}
-
-func extendBuildArgMap(newBuildArg string) {
-	separator := strings.Index(newBuildArg, "=")
-	values := []string{newBuildArg[0:separator], newBuildArg[separator+1:]}
-
-	argKey := strings.TrimSpace(values[0])
-	argValue := strings.TrimSpace(values[1])
-
-	if packagesArg, hasPackagesArg := buildArgMap[argKey]; hasPackagesArg {
-		buildArgMap[argKey] = packagesArg + " " + argValue
-	} else {
-		buildArgMap[argKey] = argValue
-	}
-}
-
-func validateBuildOption(buildOption string, language string) (string, bool, error) {
-	buildOptions, err := deriveBuildOptions(language)
-
+func extendBuildArgMap(newBuildArgs []string) {
+	argsMap, err := parseMap(newBuildArgs, "build-arg")
 	if err != nil {
-		return "", false, err
-	}
-
-	foundOption, isFound := findBuildOption(buildOptions, buildOption)
-
-	if isFound {
-		buildOptionPackages := strings.Join(foundOption.Packages, " ")
-		return additionalPackageBuildArg + "=" + buildOptionPackages, isFound, err
-	}
-
-	err = fmt.Errorf("ERROR! You're using a wrong build option. Please check the  template/language/template.yml for supported build options.")
-	if err != nil {
+		err = fmt.Errorf("error parsing build args derived from build options: %v", err)
 		fmt.Println(err)
 	}
 
-	return "", false, err
+	for argKey, argValue := range argsMap {
+		if arg, hasValue := buildArgMap[argKey]; hasValue {
+			buildArgMap[argKey] = arg + " " + argValue
+		} else {
+			buildArgMap[argKey] = argValue
+		}
+	}
+}
+
+func validateBuildOptions(buildOptions []string, language string) ([]string, error) {
+	derivedBuildOptions, err := deriveBuildOptions(language)
+	res := []string{}
+
+	if err != nil {
+		return res, err
+	}
+
+	foundOptions, err := findBuildOptions(derivedBuildOptions, buildOptions)
+
+	for _, option := range foundOptions {
+		buildOptionPackages := strings.Join(option.Packages, " ")
+		res = append(res, option.Arg+"="+buildOptionPackages)
+	}
+
+	return res, err
 }
 
 func deriveBuildOptions(language string) ([]stack.BuildOption, error) {
-	var buildOptions = []stack.BuildOption{}
+	var derivedBuildOptions = []stack.BuildOption{}
 
 	pathToTemplateYAML := "./template/" + language + "/template.yml"
 	if _, err := os.Stat(pathToTemplateYAML); os.IsNotExist(err) {
-		return buildOptions, err
+		return derivedBuildOptions, err
 	}
 
 	var langTemplate stack.LanguageTemplate
 	parsedLangTemplate, err := stack.ParseYAMLForLanguageTemplate(pathToTemplateYAML)
 
 	if err != nil {
-		return buildOptions, err
+		return derivedBuildOptions, err
 	}
 
 	if parsedLangTemplate != nil {
 		langTemplate = *parsedLangTemplate
-		buildOptions = langTemplate.BuildOptions
+		derivedBuildOptions = langTemplate.BuildOptions
 	}
 
-	return buildOptions, nil
+	return derivedBuildOptions, nil
 }
 
-func findBuildOption(buildOptions []stack.BuildOption, requiredBuildOption string) (stack.BuildOption, bool) {
-	for _, option := range buildOptions {
-		if option.Name == requiredBuildOption {
-			return option, true
+func findBuildOptions(derivedBuildOptions []stack.BuildOption, requiredBuildOptions []string) ([]stack.BuildOption, error) {
+	res := []stack.BuildOption{}
+	var err error
+
+	for _, requiredOption := range requiredBuildOptions {
+		optionExists := false
+		for _, option := range derivedBuildOptions {
+			if option.Name == requiredOption {
+				res = append(res, option)
+				optionExists = true
+				break
+			}
+		}
+
+		if !optionExists {
+			err := fmt.Errorf("ERROR! You're using a wrong build option. Please check the  template/language/template.yml for supported build options.")
+			fmt.Println(err)
 		}
 	}
 
-	return stack.BuildOption{}, false
+	return res, err
 }
 
 func runBuild(cmd *cobra.Command, args []string) error {
@@ -279,7 +243,7 @@ func build(services *stack.Services, queueDepth int, shrinkwrap bool) {
 		if function.SkipBuild {
 			fmt.Printf("Skipping build of: %s.\n", function.Name)
 		} else {
-			checkAndApplyBuildOptions(function)
+			validateBuildOptions(function.Build.Options, function.Language)
 			function.Name = k
 			workChannel <- function
 		}

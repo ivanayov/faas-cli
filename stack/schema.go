@@ -81,5 +81,6 @@ type LanguageTemplate struct {
 
 type BuildOption struct {
 	Name     string   `yaml:"name"`
+	Arg      string   `yaml:"arg"`
 	Packages []string `yaml:"packages"`
 }
