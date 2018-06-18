@@ -18,6 +18,7 @@ import (
 
 // Flags that are to be added to commands.
 var (
+
 	nocache      bool
 	squash       bool
 	parallel     int
@@ -25,7 +26,10 @@ var (
 	buildArgs    []string
 	buildArgMap  map[string]string
 	buildOptions []string
+
 )
+
+const additionalPackageBuildArg = "ADDITIONAL_PACKAGE"
 
 func init() {
 	// Setup flags that are used by multiple commands (variables defined in faas.go)
@@ -41,6 +45,8 @@ func init() {
 	buildCmd.Flags().BoolVar(&shrinkwrap, "shrinkwrap", false, "Just write files to ./build/ folder for shrink-wrapping")
 	buildCmd.Flags().StringArrayVarP(&buildArgs, "build-arg", "b", []string{}, "Add a build-arg for Docker (KEY=VALUE)")
 	buildCmd.Flags().StringArrayVarP(&buildOptions, "build-option", "o", []string{}, "Set a build option, e.g. dev")
+
+	buildCmd.Flags().StringVar(&buildOption, "build-option", "", "Set a build option, e.g. dev")
 
 	// Set bash-completion.
 	_ = buildCmd.Flags().SetAnnotation("handler", cobra.BashCompSubdirsInDir, []string{})
@@ -80,6 +86,14 @@ via flags.`,
 func preRunBuild(cmd *cobra.Command, args []string) error {
 	language, _ = validateLanguageFlag(language)
 
+	if buildOption != "" {
+		arg, validBuildOption, err := validateBuildOption(buildOption, language)
+
+		if validBuildOption && err == nil {
+			buildArgs = append(buildArgs, arg)
+		}
+	}
+
 	mapped, err := parseBuildArgs(buildArgs)
 
 	if err == nil {
@@ -110,6 +124,7 @@ func parseBuildArgs(args []string) (map[string]string, error) {
 			return nil, fmt.Errorf("build-arg must have a non-empty value")
 		}
 
+
 		if k == builder.AdditionalPackageBuildArg && len(mapped[k]) > 0 {
 			mapped[k] = mapped[k] + " " + v
 		} else {
@@ -118,6 +133,62 @@ func parseBuildArgs(args []string) (map[string]string, error) {
 	}
 
 	return mapped, nil
+}
+
+func validateBuildOption(buildOption string, language string) (string, bool, error) {
+
+	buildOptions, err := deriveBuildOptions(language)
+
+	if err != nil {
+		return "", false, err
+	}
+
+	foundOption, isFound := findBuildOption(buildOptions, buildOption)
+
+	if isFound {
+		buildOptionPackages := strings.Join(foundOption.Packages, " ")
+		return additionalPackageBuildArg + "=" + buildOptionPackages, isFound, err
+	}
+
+	err = fmt.Errorf("ERROR! You're using a wrong build option. Please check the  template/language/template.yml for supported build options.")
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	return "", false, err
+}
+
+func deriveBuildOptions(language string) ([]stack.BuildOption, error) {
+	var buildOptions = []stack.BuildOption{}
+
+	pathToTemplateYAML := "./template/" + language + "/template.yml"
+	if _, err := os.Stat(pathToTemplateYAML); os.IsNotExist(err) {
+		return buildOptions, err
+	}
+
+	var langTemplate stack.LanguageTemplate
+	parsedLangTemplate, err := stack.ParseYAMLForLanguageTemplate(pathToTemplateYAML)
+
+	if err != nil {
+		return buildOptions, err
+	}
+
+	if parsedLangTemplate != nil {
+		langTemplate = *parsedLangTemplate
+		buildOptions = langTemplate.BuildOptions
+	}
+
+	return buildOptions, nil
+}
+
+func findBuildOption(buildOptions []stack.BuildOption, requiredBuildOption string) (stack.BuildOption, bool) {
+	for _, option := range buildOptions {
+		if option.Name == requiredBuildOption {
+			return option, true
+		}
+	}
+
+	return stack.BuildOption{}, false
 }
 
 func runBuild(cmd *cobra.Command, args []string) error {
